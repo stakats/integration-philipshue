@@ -14,12 +14,31 @@ import {
   LightResourceResponse,
   LightResourceResult
 } from "./types.js";
+import { CommandCoalescer } from "./command-coalescer.js";
+
+// Bridge rate limits per Philips Hue CLIP v2 docs (core-concepts).
+// `/light`: max 10 commands/sec; `/grouped_light`: max 1 command/sec.
+// Exceeding these causes the bridge to silently drop commands. We honor them
+// client-side via a per-resource coalescing limiter so drag-burst commands
+// are merged rather than dropped.
+const LIGHT_MIN_INTERVAL_MS = 100;
+const GROUPED_LIGHT_MIN_INTERVAL_MS = 1000;
 
 class LightResource {
   private readonly api: ResourceApi;
+  private readonly lightCoalescer: CommandCoalescer<Partial<LightResourceParams>>;
+  private readonly groupedLightCoalescer: CommandCoalescer<Partial<LightResourceParams>>;
 
   constructor(api: ResourceApi) {
     this.api = api;
+    this.lightCoalescer = new CommandCoalescer<Partial<LightResourceParams>>(LIGHT_MIN_INTERVAL_MS, (id, params) =>
+      this.api.sendRequest<LightResourceResponse>("PUT", `/clip/v2/resource/light/${id}`, params)
+    );
+    this.groupedLightCoalescer = new CommandCoalescer<Partial<LightResourceParams>>(
+      GROUPED_LIGHT_MIN_INTERVAL_MS,
+      (id, params) =>
+        this.api.sendRequest<LightResourceResponse>("PUT", `/clip/v2/resource/grouped_light/${id}`, params)
+    );
   }
 
   async getLights(): Promise<LightResourceData[]> {
@@ -98,14 +117,16 @@ class LightResource {
     return res.data;
   }
 
-  async updateLightState(
-    id: string,
-    params: Partial<LightResourceParams>,
-    singleLight: boolean
-  ): Promise<LightResourceResponse["data"]> {
-    const endpoint = singleLight ? `/clip/v2/resource/light/${id}` : `/clip/v2/resource/grouped_light/${id}`;
-    const res = await this.api.sendRequest<LightResourceResponse>("PUT", endpoint, params);
-    return res.data;
+  /**
+   * Send a light-state update. Routes through the per-resource coalescer so
+   * bursts from color-wheel drags don't exceed the bridge's documented rate
+   * limits. Callers await resolution to know the command (or a coalesced
+   * superset of it) has been dispatched. The bridge's own response body is not
+   * surfaced to the caller when coalesced; no current caller consumes it.
+   */
+  async updateLightState(id: string, params: Partial<LightResourceParams>, singleLight: boolean): Promise<void> {
+    const coalescer = singleLight ? this.lightCoalescer : this.groupedLightCoalescer;
+    await coalescer.send(id, params);
   }
 }
 
