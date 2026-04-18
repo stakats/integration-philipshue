@@ -18,7 +18,10 @@ test("fires the first command immediately", async (t) => {
 
 test("coalesces bursts within the min interval into a single dispatch", async (t) => {
   const calls: Array<{ id: string; params: Record<string, unknown> }> = [];
-  const c = new CommandCoalescer<Record<string, unknown>>(50, async (id, params) => {
+  // Generous interval (250ms) so coalescing is reliable even on slow hardware
+  // (Raspberry Pi CI target) where microtask scheduling can stretch ~100ms
+  // between the immediate dispatch and subsequent send() calls.
+  const c = new CommandCoalescer<Record<string, unknown>>(250, async (id, params) => {
     calls.push({ id, params });
   });
 
@@ -40,7 +43,7 @@ test("coalesces bursts within the min interval into a single dispatch", async (t
 
 test("shallow-merges coalesced params across different fields", async (t) => {
   const calls: Array<{ id: string; params: Record<string, unknown> }> = [];
-  const c = new CommandCoalescer<Record<string, unknown>>(50, async (id, params) => {
+  const c = new CommandCoalescer<Record<string, unknown>>(250, async (id, params) => {
     calls.push({ id, params });
   });
 
@@ -108,14 +111,18 @@ test("pending count reflects unflushed commands", async (t) => {
 });
 
 test("dispatch errors reject all coalesced send() promises", async (t) => {
-  const c = new CommandCoalescer<Record<string, unknown>>(30, async (_id, params) => {
+  // Generous min-interval so subsequent sends actually coalesce (don't slot
+  // as immediate dispatches) on slow hardware, and we attach the throwsAsync
+  // handlers synchronously after c.send() returns so the rejection isn't
+  // briefly unhandled if the flush fires before we await.
+  const c = new CommandCoalescer<Record<string, unknown>>(250, async (_id, params) => {
     if ((params as { fail?: boolean }).fail) throw new Error("boom");
   });
 
   await c.send("light-a", { on: { on: true } });
   const p2 = c.send("light-a", { on: { on: false } });
   const p3 = c.send("light-a", { fail: true });
-
-  await t.throwsAsync(p2, { message: "boom" });
-  await t.throwsAsync(p3, { message: "boom" });
+  const p2Throws = t.throwsAsync(p2, { message: "boom" });
+  const p3Throws = t.throwsAsync(p3, { message: "boom" });
+  await Promise.all([p2Throws, p3Throws]);
 });
