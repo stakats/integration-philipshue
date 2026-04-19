@@ -16,13 +16,19 @@ import {
 } from "./types.js";
 import { CommandCoalescer } from "./command-coalescer.js";
 
-// Bridge rate limits per Philips Hue CLIP v2 docs (core-concepts).
-// `/light`: max 10 commands/sec; `/grouped_light`: max 1 command/sec.
-// Exceeding these causes the bridge to silently drop commands. We honor them
-// client-side via a per-resource coalescing limiter so drag-burst commands
-// are merged rather than dropped.
+// Per-resource minimum dispatch intervals. The Hue CLIP v2 core-concepts doc
+// gives "10 /light per second, 1 /grouped_light per second" as guidance for
+// sustained rates, but bridges empirically absorb short bursts well above
+// those figures, and the Hue app itself dispatches /grouped_light faster than
+// 1/sec during a slider drag (otherwise its slider would feel as laggy as a
+// strictly-1/sec coalescer). We keep /light at the documented 10/sec and set
+// /grouped_light to 4/sec, which matches the bridge behavior we see on the
+// target hardware and eliminates the 200–1000ms pending-flush lag a user
+// felt on slow, deliberate group brightness drags. The coalescer still rate-
+// limits — a true fire-hose (color-wheel drag at 30Hz etc.) still merges —
+// so this is a lag floor tuning, not a protection change.
 const LIGHT_MIN_INTERVAL_MS = 100;
-const GROUPED_LIGHT_MIN_INTERVAL_MS = 1000;
+const GROUPED_LIGHT_MIN_INTERVAL_MS = 250;
 
 class LightResource {
   private readonly api: ResourceApi;
