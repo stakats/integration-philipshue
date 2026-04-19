@@ -58,6 +58,20 @@ class PhilipsHue {
   private v1LightIds: Set<string> = new Set();
   // migration guard flag
   private migrating = false;
+  // v2 id -> wall time of the most recent user command targeting this entity. Used to
+  // gate echo-driven attribute updates in syncLightState: while a command is in-flight
+  // (coalescer plus bridge + SSE round-trip, ~1s), stale echoes of earlier dispatched
+  // values can regress the optimistic self-update and make the Remote's slider jump
+  // back to a prior position on re-touch. See applyOptimisticAttributes for the write
+  // side and syncLightState for the suppression window.
+  private lastCommandAt: Map<string, number> = new Map();
+  // Echo-suppression window: brightness/color/color_temperature SSE updates are
+  // ignored for this long after the user's most recent command for the same entity.
+  // Chosen to cover the /grouped_light coalescer interval (1000ms) plus typical
+  // bridge + SSE latency headroom. `on/off` state is always applied — it is not a
+  // fast-drag attribute and we want external toggles (Hue app, motion sensor) to
+  // flow through without delay.
+  private readonly echoSuppressMs = 1500;
 
   constructor() {
     this.uc = new IntegrationAPI();
@@ -326,6 +340,14 @@ class PhilipsHue {
       log.error("handleLightCmd, missing groupedLightIds for group entity: %s", entity.id);
       return StatusCodes.NotFound;
     }
+
+    // Record the command and push the user's intent to the Remote optimistically,
+    // so the slider reflects the new position without waiting for the coalesced
+    // PUT to round-trip via the bridge + SSE stream. syncLightState uses the
+    // recorded timestamp to suppress the echo that would otherwise regress this.
+    const v2ScopeId = isGroup ? entity.id : this.getV2EntityId(entity.id);
+    this.lastCommandAt.set(v2ScopeId, Date.now());
+    this.applyOptimisticAttributes(v2ScopeId, command, params);
 
     const results = new Set(
       await Promise.all(
@@ -718,9 +740,74 @@ class PhilipsHue {
   }
 
   /**
+   * Push the user's intended attributes to the Remote before the outbound command
+   * round-trips through the bridge + SSE stream. Without this, the slider would
+   * depend entirely on echo events for its displayed position, and at drag rates
+   * faster than the coalesced dispatch cycle the Remote's cached brightness lags
+   * behind the finger and snaps back to stale values on re-touch.
+   *
+   * Only the attributes implied by the command are written. Toggle is skipped —
+   * we can't predict the resulting state without reading the current one, and the
+   * SSE echo will arrive within a coalescer cycle anyway.
+   *
+   * @param v2ScopeId v2 identifier used for both the command timestamp and public-id lookup.
+   */
+  private applyOptimisticAttributes(
+    v2ScopeId: string,
+    command: string,
+    params?: { [key: string]: string | number | boolean }
+  ) {
+    const publicIds = this.getPublicEntityIds(v2ScopeId);
+    if (publicIds.length === 0) {
+      return;
+    }
+
+    const attrs: Record<string, string | number> = {};
+    switch (command) {
+      case LightCommands.On: {
+        attrs[LightAttributes.State] = LightStates.On;
+        if (params?.brightness !== undefined) {
+          const b = Number(params.brightness);
+          if (b === 0) {
+            attrs[LightAttributes.State] = LightStates.Off;
+          } else {
+            attrs[LightAttributes.Brightness] = b;
+          }
+        }
+        if (params?.color_temperature !== undefined) {
+          attrs[LightAttributes.ColorTemperature] = Number(params.color_temperature);
+        }
+        if (params?.hue !== undefined && params?.saturation !== undefined) {
+          attrs[LightAttributes.Hue] = Number(params.hue);
+          attrs[LightAttributes.Saturation] = Number(params.saturation);
+        }
+        break;
+      }
+      case LightCommands.Off:
+        attrs[LightAttributes.State] = LightStates.Off;
+        break;
+      default:
+        // Toggle (and any unknown command): let the SSE echo settle the state.
+        return;
+    }
+
+    const configured = this.uc.getConfiguredEntities();
+    for (const publicEntityId of publicIds) {
+      configured.updateEntityAttributes(publicEntityId, attrs);
+    }
+  }
+
+  /**
    * Synchronizes the state of a light entity with the current state of the provided light resource.
    *
    * An entity change event is triggered if any entity attribute changes.
+   *
+   * Brightness, color, and color_temperature updates are suppressed for a short
+   * window after the user's most recent command targeting this entity: those
+   * attributes are what the Remote's touch sliders manipulate, and a late echo of
+   * an earlier dispatched value would regress the optimistic self-update and make
+   * the slider snap back to a stale position. `on/off` state is always applied so
+   * external toggles (Hue app, motion sensor) stay responsive.
    *
    * @param v2Id - The unique v2 identifier of the entity to be synced.
    * @param light - A partial representation of the light resource containing the updated state.
@@ -733,32 +820,37 @@ class PhilipsHue {
       return;
     }
 
+    const lastCmd = this.lastCommandAt.get(v2Id);
+    const suppressDragAttrs = lastCmd !== undefined && Date.now() - lastCmd < this.echoSuppressMs;
+
     const lightState: Record<string, string | number> = {};
     if (light.on) {
       lightState[LightAttributes.State] = light.on.on ? LightStates.On : LightStates.Off;
     }
-    if (light.dimming) {
-      lightState[LightAttributes.Brightness] = percentToBrightness(light.dimming.brightness);
-    }
-    if (light.color_temperature && light.color_temperature.mirek_valid) {
-      const config = this.config.getLight(v2Id);
-      const mirek = this.getMirek(v2Id, config);
-      const minMirek = mirek?.minMirek;
-      const maxMirek = mirek?.maxMirek;
-      if (minMirek && maxMirek) {
-        lightState[LightAttributes.ColorTemperature] = mirekToColorTemp(
-          light.color_temperature.mirek,
-          minMirek,
-          maxMirek
-        );
+    if (!suppressDragAttrs) {
+      if (light.dimming) {
+        lightState[LightAttributes.Brightness] = percentToBrightness(light.dimming.brightness);
       }
-    }
+      if (light.color_temperature && light.color_temperature.mirek_valid) {
+        const config = this.config.getLight(v2Id);
+        const mirek = this.getMirek(v2Id, config);
+        const minMirek = mirek?.minMirek;
+        const maxMirek = mirek?.maxMirek;
+        if (minMirek && maxMirek) {
+          lightState[LightAttributes.ColorTemperature] = mirekToColorTemp(
+            light.color_temperature.mirek,
+            minMirek,
+            maxMirek
+          );
+        }
+      }
 
-    if (light.color && light.color.xy) {
-      const config = this.config.getLight(v2Id);
-      const { hue, sat } = convertXYtoHSV(light.color.xy.x, light.color.xy.y, light.color.gamut ?? config?.gamut);
-      lightState[LightAttributes.Hue] = hue;
-      lightState[LightAttributes.Saturation] = sat;
+      if (light.color && light.color.xy) {
+        const config = this.config.getLight(v2Id);
+        const { hue, sat } = convertXYtoHSV(light.color.xy.x, light.color.xy.y, light.color.gamut ?? config?.gamut);
+        lightState[LightAttributes.Hue] = hue;
+        lightState[LightAttributes.Saturation] = sat;
+      }
     }
 
     // update changed attributes and send WS entity change event
