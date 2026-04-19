@@ -5,6 +5,8 @@
  * @license Mozilla Public License Version 2.0, see LICENSE for more details.
  */
 
+import log from "../../log.js";
+
 /**
  * Leading-edge + trailing-coalesce rate limiter, keyed per light / grouped-light
  * resource ID. The first command in a quiet window fires immediately for
@@ -57,6 +59,7 @@ export class CommandCoalescer<Params extends object> {
       // Quiet window: fire immediately.
       entry.lastSentAt = now;
       this.state.set(id, entry);
+      log.debug("coalescer immediate id=%s params=%j", id, params);
       await this.dispatch(id, params);
       return;
     }
@@ -101,6 +104,7 @@ export class CommandCoalescer<Params extends object> {
     entry.pending = undefined;
     entry.lastSentAt = Date.now();
     this.state.set(id, entry);
+    log.debug("coalescer flush id=%s merged=%d params=%j", id, resolvers.length, params);
     try {
       await this.dispatch(id, params);
       for (const r of resolvers) r();
