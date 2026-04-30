@@ -667,6 +667,7 @@ class PhilipsHue {
           this.propagateGroupRenameToScenes(data.id, updateGroupData.metadata.name);
         }
       } else if (data.type === "scene") {
+        log.debug("event stream scene update: %s", JSON.stringify(data));
         const sceneCfg = this.config.getScene(data.id);
         if (!sceneCfg) {
           log.debug("No config for scene %s, skipping update", data.id);
