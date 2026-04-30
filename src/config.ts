@@ -39,7 +39,6 @@ export interface GroupConfig extends Omit<LightConfig, "id_v1"> {
 export type LightOrGroupConfig = LightConfig | GroupConfig;
 
 export interface SceneConfig {
-  id_v1?: string;
   name: string;
   groupId: string;
   groupRtype: "room" | "zone";

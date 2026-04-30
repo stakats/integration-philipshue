@@ -79,7 +79,6 @@ export function addAvailableScenes(scenes: CombinedSceneResource[], config: Conf
       return;
     }
     config.addScene(scene.id, {
-      id_v1: scene.id_v1,
       name: scene.name,
       groupId: scene.group.rid,
       groupRtype: scene.group.rtype,

@@ -66,7 +66,6 @@ class SceneResource {
     const rtype: "room" | "zone" = scene.group.rtype === "zone" ? "zone" : "room";
     return {
       id: scene.id,
-      id_v1: scene.id_v1,
       name: scene.metadata.name,
       group: { rid: scene.group.rid, rtype },
       groupName: groupNameById.get(scene.group.rid)

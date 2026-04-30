@@ -381,7 +381,6 @@ export interface CombinedGroupResource {
 
 export interface SceneResource {
   id: string;
-  id_v1?: string;
   type: "scene";
   metadata: { name: string };
   group: ResourceIdentifier;
@@ -408,7 +407,6 @@ export type SceneRecallResponse = LightResourceResponse;
  */
 export interface CombinedSceneResource {
   id: string;
-  id_v1?: string;
   name: string;
   group: { rid: string; rtype: "room" | "zone" };
   groupName: string | undefined;
