@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-_Changes in the next release_
+### Added
+
+- Hue scenes are exposed as `Button` entities, named `<Group> - <Scene>`. Push the
+  button to recall the scene; the bridge auto-starts dynamics when the scene has
+  `auto_dynamic: true`.
+- A driver-wide `Hue Scene Dynamics` switch entity. ON starts the active scene's
+  dynamic palette; OFF stops it. State follows whichever scene the bridge reports
+  as currently active (so it tracks scene activations from the Hue app and other
+  clients, not just the remote).
+
+### Changed
+
+- Configuration version bumped from 3 to 4. The migration fetches scenes from
+  `/clip/v2/resource/scene` alongside lights, rooms, and zones.
 
 ---
 

@@ -7,7 +7,14 @@
 
 import { LightFeatures } from "@unfoldedcircle/integration-api";
 import fs from "fs";
-import { CombinedGroupResource, GamutTriangle, GamutType, GroupType, LightResource } from "./lib/hue-api/types.js";
+import {
+  CombinedGroupResource,
+  CombinedSceneResource,
+  GamutTriangle,
+  GamutType,
+  GroupType,
+  LightResource
+} from "./lib/hue-api/types.js";
 import i18n from "i18n";
 import log from "./log.js";
 import Config, { GroupConfig, LightConfig } from "./config.js";
@@ -62,6 +69,22 @@ export function addAvailableGroups(groups: CombinedGroupResource[], groupType: G
       gamut: getRepresentativeGamutTriangle(group),
       mirek_schema: getMinMaxMirek(group)
     } as GroupConfig);
+  });
+}
+
+export function addAvailableScenes(scenes: CombinedSceneResource[], config: Config) {
+  scenes.forEach((scene) => {
+    if (config.getScene(scene.id)) {
+      log.info("Scene with id %s already exists in config, skipping", scene.id);
+      return;
+    }
+    config.addScene(scene.id, {
+      id_v1: scene.id_v1,
+      name: scene.name,
+      groupId: scene.group.rid,
+      groupRtype: scene.group.rtype,
+      groupName: scene.groupName
+    });
   });
 }
 

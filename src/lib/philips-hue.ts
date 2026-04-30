@@ -6,6 +6,9 @@
  */
 
 import {
+  Button,
+  ButtonCommands,
+  ButtonStates,
   DeviceStates,
   Entity,
   Events,
@@ -15,13 +18,19 @@ import {
   LightCommands,
   LightFeatures,
   LightStates,
-  StatusCodes
+  StatusCodes,
+  Switch,
+  SwitchAttributes,
+  SwitchCommands,
+  SwitchFeatures,
+  SwitchStates
 } from "@unfoldedcircle/integration-api";
-import Config, { ConfigEvent, GroupConfig, LightOrGroupConfig } from "../config.js";
+import Config, { ConfigEvent, GroupConfig, LightOrGroupConfig, SceneConfig } from "../config.js";
 import log from "../log.js";
 import {
   addAvailableGroups,
   addAvailableLights,
+  addAvailableScenes,
   brightnessToPercent,
   colorTempToMirek,
   convertHSVtoXY,
@@ -37,8 +46,17 @@ import {
 } from "../util.js";
 import HueApi, { HueError } from "./hue-api/api.js";
 import HueEventStream from "./hue-api/event-stream.js";
-import { CombinedGroupResource, HueEvent, LightResource, LightResourceParams } from "./hue-api/types.js";
+import {
+  CombinedGroupResource,
+  HueEvent,
+  LightResource,
+  LightResourceParams,
+  SceneRecallAction
+} from "./hue-api/types.js";
 import PhilipsHueSetup from "./setup.js";
+
+const SCENE_ENTITY_PREFIX = "hue_scene_";
+const SCENE_DYNAMIC_TOGGLE_ID = "hue_scenes_dynamic_toggle";
 
 const MIGRATION_MAX_RETRIES = 6;
 const MIGRATION_INITIAL_RETRY_DELAY_MS = 1000;
@@ -58,6 +76,11 @@ class PhilipsHue {
   private v1LightIds: Set<string> = new Set();
   // migration guard flag
   private migrating = false;
+  // Most recently activated scene id. The dynamic-toggle Switch acts on this scene
+  // and is updated from SSE `scene.status.active` transitions (so it follows scene
+  // activations from the Hue app and other clients, not just the remote).
+  private lastActivatedSceneId?: string;
+  private dynamicToggleState: SwitchStates = SwitchStates.Off;
 
   constructor() {
     this.uc = new IntegrationAPI();
@@ -121,6 +144,12 @@ class PhilipsHue {
             addAvailableGroups(zoneData, "zone", this.config);
           }
 
+          const scenes = await this.hueApi.sceneResource.getScenes();
+          this.config.removeScenes();
+          if (scenes.length > 0) {
+            addAvailableScenes(scenes, this.config);
+          }
+
           this.updateEntityIndexes();
           this.config.markMigrated();
           this.migrating = false;
@@ -172,6 +201,13 @@ class PhilipsHue {
         features: light.features
       });
       this.addAvailableLight(lightEntity);
+    }
+    const scenes = this.config.getScenes();
+    for (const scene of scenes) {
+      this.addAvailableScene(scene);
+    }
+    if (scenes.length > 0) {
+      this.addAvailableDynamicToggle();
     }
   }
 
@@ -253,6 +289,8 @@ class PhilipsHue {
     // removing entities with a single bridge is easy
     this.uc.clearConfiguredEntities();
     this.uc.clearAvailableEntities();
+    this.lastActivatedSceneId = undefined;
+    this.dynamicToggleState = SwitchStates.Off;
   }
 
   // terri: check if you can simplify since
@@ -265,6 +303,9 @@ class PhilipsHue {
         features: event.data.features
       });
       this.addAvailableLight(light);
+    } else if (event.type === "scene-added") {
+      this.addAvailableScene(event.data);
+      this.addAvailableDynamicToggle();
     }
     this.updateEntityIndexes();
   }
@@ -424,6 +465,114 @@ class PhilipsHue {
     }
   }
 
+  private getSceneEntityId(sceneId: string): string {
+    return `${SCENE_ENTITY_PREFIX}${sceneId}`;
+  }
+
+  private formatSceneName(scene: SceneConfig): string {
+    return scene.groupName ? `${scene.groupName} - ${scene.name}` : scene.name;
+  }
+
+  private addAvailableScene(scene: SceneConfig & { id: string }) {
+    const entityId = this.getSceneEntityId(scene.id);
+    const button = new Button(entityId, this.formatSceneName(scene), {
+      description: scene.groupName ? `Hue scene in ${scene.groupName}` : "Hue scene",
+      area: scene.groupName,
+      state: ButtonStates.Available
+    });
+    button.setCmdHandler(this.onSceneCommand.bind(this));
+    this.uc.addAvailableEntity(button);
+  }
+
+  private async onSceneCommand(
+    entity: Entity,
+    command: string,
+    _params?: { [key: string]: string | number | boolean }
+  ): Promise<StatusCodes> {
+    if (command !== ButtonCommands.Push) {
+      log.error("onSceneCommand: unsupported command: %s", command);
+      return StatusCodes.BadRequest;
+    }
+    const entityId = entity.id as string;
+    const sceneId = entityId.startsWith(SCENE_ENTITY_PREFIX) ? entityId.slice(SCENE_ENTITY_PREFIX.length) : entityId;
+    try {
+      await this.hueApi.sceneResource.recall(sceneId);
+      // Optimistic tracker update so a fast switch press lands on the right scene
+      // before SSE confirms.
+      this.lastActivatedSceneId = sceneId;
+      return StatusCodes.Ok;
+    } catch (error) {
+      if (error instanceof HueError) {
+        return error.statusCode;
+      }
+      log.error("Scene recall failed for %s", sceneId, error);
+      return StatusCodes.ServerError;
+    }
+  }
+
+  private addAvailableDynamicToggle() {
+    if (this.uc.getAvailableEntities().contains(SCENE_DYNAMIC_TOGGLE_ID)) {
+      return;
+    }
+    const toggle = new Switch(SCENE_DYNAMIC_TOGGLE_ID, "Hue Scene Dynamics", {
+      description: "ON starts the active scene's dynamic palette; OFF stops it.",
+      features: [SwitchFeatures.OnOff, SwitchFeatures.Toggle],
+      attributes: { [SwitchAttributes.State]: this.dynamicToggleState }
+    });
+    toggle.setCmdHandler(this.onDynamicToggleCommand.bind(this));
+    this.uc.addAvailableEntity(toggle);
+  }
+
+  private async onDynamicToggleCommand(
+    _entity: Entity,
+    command: string,
+    _params?: { [key: string]: string | number | boolean }
+  ): Promise<StatusCodes> {
+    if (!this.lastActivatedSceneId) {
+      log.warn("Dynamic toggle pressed but no scene has been activated yet; press a scene button first");
+      return StatusCodes.BadRequest;
+    }
+
+    let nextState: SwitchStates;
+    switch (command) {
+      case SwitchCommands.On:
+        nextState = SwitchStates.On;
+        break;
+      case SwitchCommands.Off:
+        nextState = SwitchStates.Off;
+        break;
+      case SwitchCommands.Toggle:
+        nextState = this.dynamicToggleState === SwitchStates.On ? SwitchStates.Off : SwitchStates.On;
+        break;
+      default:
+        log.error("onDynamicToggleCommand: unsupported command: %s", command);
+        return StatusCodes.BadRequest;
+    }
+
+    const action: SceneRecallAction = nextState === SwitchStates.On ? "dynamic_palette" : "static";
+    try {
+      await this.hueApi.sceneResource.recall(this.lastActivatedSceneId, action);
+      this.setDynamicToggleState(nextState);
+      return StatusCodes.Ok;
+    } catch (error) {
+      if (error instanceof HueError) {
+        return error.statusCode;
+      }
+      log.error("Dynamic toggle recall failed for scene %s", this.lastActivatedSceneId, error);
+      return StatusCodes.ServerError;
+    }
+  }
+
+  private setDynamicToggleState(state: SwitchStates) {
+    if (this.dynamicToggleState === state) {
+      return;
+    }
+    this.dynamicToggleState = state;
+    this.uc.getConfiguredEntities().updateEntityAttributes(SCENE_DYNAMIC_TOGGLE_ID, {
+      [SwitchAttributes.State]: state
+    });
+  }
+
   private getMirek(entityId: string, config?: LightOrGroupConfig) {
     const minMirek = config?.mirek_schema?.mirek_minimum;
     const maxMirek = config?.mirek_schema?.mirek_maximum;
@@ -514,7 +663,41 @@ class PhilipsHue {
           this.syncGroupState(data.id, updateGroupData).catch((error) =>
             log.error("Syncing group state failed for event stream update:", error)
           );
+          // a group rename cascades to the displayed names of any scenes pointing at it
+          this.propagateGroupRenameToScenes(data.id, updateGroupData.metadata.name);
         }
+      } else if (data.type === "scene") {
+        const sceneCfg = this.config.getScene(data.id);
+        if (!sceneCfg) {
+          log.debug("No config for scene %s, skipping update", data.id);
+          continue;
+        }
+        if (data.metadata && typeof data.metadata === "object" && "name" in data.metadata) {
+          const newName = data.metadata.name as string;
+          if (newName !== sceneCfg.name) {
+            this.config.updateScene(data.id, { ...sceneCfg, name: newName });
+          }
+        }
+        // Whichever scene the bridge reports as active becomes the toggle's target.
+        if (data.status && typeof data.status === "object" && "active" in data.status) {
+          const active = data.status.active as string;
+          if (active === "dynamic_palette" || active === "static") {
+            this.lastActivatedSceneId = data.id;
+            this.setDynamicToggleState(active === "dynamic_palette" ? SwitchStates.On : SwitchStates.Off);
+          } else if (active === "inactive" && this.lastActivatedSceneId === data.id) {
+            this.lastActivatedSceneId = undefined;
+            this.setDynamicToggleState(SwitchStates.Off);
+          }
+        }
+      }
+    }
+  }
+
+  private propagateGroupRenameToScenes(groupId: string, newGroupName: string) {
+    for (const scene of this.config.getScenes()) {
+      if (scene.groupId === groupId && scene.groupName !== newGroupName) {
+        const { id, ...rest } = scene;
+        this.config.updateScene(id, { ...rest, groupName: newGroupName });
       }
     }
   }
@@ -534,13 +717,30 @@ class PhilipsHue {
             addAvailableGroups([group], data.type, this.config);
           }
           break;
+        case "scene": {
+          const scene = await this.hueApi.sceneResource.getScene(data.id);
+          addAvailableScenes([scene], this.config);
+          break;
+        }
       }
     }
   }
 
   private handleEventStreamDelete(event: HueEvent) {
     const configured = this.uc.getConfiguredEntities();
+    const available = this.uc.getAvailableEntities();
     for (const data of event.data) {
+      if (data.type === "scene") {
+        const entityId = this.getSceneEntityId(data.id);
+        configured.removeEntity(entityId);
+        available.removeEntity(entityId);
+        this.config.removeScene(data.id);
+        if (this.lastActivatedSceneId === data.id) {
+          this.lastActivatedSceneId = undefined;
+          this.setDynamicToggleState(SwitchStates.Off);
+        }
+        continue;
+      }
       const publicIds = this.getPublicEntityIds(data.id);
       for (const publicEntityId of publicIds) {
         configured.updateEntityAttributes(publicEntityId, {
@@ -577,6 +777,10 @@ class PhilipsHue {
     if (hubConfig && hubConfig.ip) {
       // manually fetch the current light states and send entity updates
       for (const id of ids) {
+        // Scene buttons and the dynamic-toggle Switch are not lights/groups; skip the per-entity fetch.
+        if (id.startsWith(SCENE_ENTITY_PREFIX) || id === SCENE_DYNAMIC_TOGGLE_ID) {
+          continue;
+        }
         await this.updateLight(id);
       }
       this.updateEntityIndexes();

@@ -379,6 +379,41 @@ export interface CombinedGroupResource {
   };
 }
 
+export interface SceneResource {
+  id: string;
+  id_v1?: string;
+  type: "scene";
+  metadata: { name: string };
+  group: ResourceIdentifier;
+  status?: { active: "inactive" | "static" | "dynamic_palette" };
+}
+
+export interface SceneResourceResult {
+  errors: { description: string }[];
+  data: SceneResource[];
+}
+
+export type SceneRecallAction = "active" | "dynamic_palette" | "static";
+
+export interface SceneRecallBody {
+  recall: { action: SceneRecallAction };
+}
+
+export type SceneRecallResponse = LightResourceResponse;
+
+/**
+ * Hydrated scene record: the bare scene fields the driver cares about, plus the
+ * resolved display name of the scene's owning room/zone (denormalised at fetch
+ * time so the read path can render entity names without a cross-table lookup).
+ */
+export interface CombinedSceneResource {
+  id: string;
+  id_v1?: string;
+  name: string;
+  group: { rid: string; rtype: "room" | "zone" };
+  groupName: string | undefined;
+}
+
 export type GamutType = "A" | "B" | "C";
 
 /** CIE xy chromaticity coordinates for each primary of a light's color gamut triangle. */
