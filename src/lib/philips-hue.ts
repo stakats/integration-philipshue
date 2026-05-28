@@ -991,17 +991,20 @@ class PhilipsHue {
    * Pull the current `status.active` for every scene from the bridge and apply it to the
    * corresponding group's Select `current_option`. Called on event-stream connect so the
    * Select UI is correct without waiting for the next SSE transition.
+   *
+   * Uses the lean `getSceneStatuses()` path so we don't also re-fetch rooms + zones (the
+   * group names are already cached in config from the original migration/getScenes call).
    */
   private async refreshSceneSelectStates() {
     if (this.sceneOptionToId.size === 0) {
       return;
     }
     try {
-      const scenes = await this.hueApi.sceneResource.getScenes();
+      const statuses = await this.hueApi.sceneResource.getSceneStatuses();
       const activeByGroup = new Map<string, string>();
-      for (const scene of scenes) {
-        if (scene.active === "static" || scene.active === "dynamic_palette") {
-          activeByGroup.set(scene.group.rid, scene.id);
+      for (const status of statuses) {
+        if (status.active === "static" || status.active === "dynamic_palette") {
+          activeByGroup.set(status.groupId, status.id);
         }
       }
       for (const groupId of this.sceneOptionToId.keys()) {

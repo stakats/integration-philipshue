@@ -157,6 +157,57 @@ test("recall defaults to action: 'active' and PUTs to the scene endpoint", async
   t.deepEqual(data, [{ rid: SCENE_IN_ROOM_ID }]);
 });
 
+test("getSceneStatuses returns {id, groupId, active} and skips the room/zone fetch", async (t) => {
+  const scenesResponse: SceneResourceResult = {
+    errors: [],
+    data: [
+      {
+        id: SCENE_IN_ROOM_ID,
+        type: "scene",
+        metadata: { name: "Sunset" },
+        group: { rid: ROOM_ID, rtype: "room" },
+        status: { active: "static" }
+      },
+      {
+        id: SCENE_IN_ZONE_ID,
+        type: "scene",
+        metadata: { name: "Movie" },
+        group: { rid: ZONE_ID, rtype: "zone" },
+        status: { active: "inactive" }
+      },
+      {
+        id: ORPHAN_SCENE_ID,
+        type: "scene",
+        metadata: { name: "Stale" },
+        group: { rid: ROOM_ID, rtype: "room" }
+      }
+    ]
+  };
+
+  const { api, calls } = makeMockApi({
+    "/clip/v2/resource/scene": scenesResponse
+  });
+
+  const sceneResource = new SceneResource(api);
+  const statuses = await sceneResource.getSceneStatuses();
+
+  t.is(calls.length, 1, "should make exactly one API call (no room/zone fetch)");
+  t.is(calls[0].endpoint, "/clip/v2/resource/scene");
+  t.deepEqual(statuses, [
+    { id: SCENE_IN_ROOM_ID, groupId: ROOM_ID, active: "static" },
+    { id: SCENE_IN_ZONE_ID, groupId: ZONE_ID, active: "inactive" },
+    { id: ORPHAN_SCENE_ID, groupId: ROOM_ID, active: undefined }
+  ]);
+});
+
+test("getSceneStatuses returns empty array when no scenes exist", async (t) => {
+  const { api } = makeMockApi({
+    "/clip/v2/resource/scene": { errors: [], data: [] } as SceneResourceResult
+  });
+  const sceneResource = new SceneResource(api);
+  t.deepEqual(await sceneResource.getSceneStatuses(), []);
+});
+
 test("recall forwards an explicit action to the bridge", async (t) => {
   const recallResponse: SceneRecallResponse = { errors: [], data: [{ rid: SCENE_IN_ROOM_ID }] };
   const { api, calls } = makeMockApi({

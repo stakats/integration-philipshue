@@ -50,6 +50,28 @@ class SceneResource {
     return res.data ?? [];
   }
 
+  /**
+   * Lean status-only fetch for seeding the per-group Select `current_option`.
+   *
+   * Unlike `getScenes()`, this does **not** resolve group display names — callers that only
+   * need to know which scene id is currently active in which group (i.e. `refreshSceneSelectStates`)
+   * pay for one GET instead of three (the full `getScenes()` also fetches rooms + zones to
+   * build the group-name map).
+   */
+  public async getSceneStatuses(): Promise<
+    { id: string; groupId: string; active?: "inactive" | "static" | "dynamic_palette" }[]
+  > {
+    const res = await this.api.sendRequest<SceneResourceResult>("GET", "/clip/v2/resource/scene");
+    if (!res.data || res.data.length === 0) {
+      return [];
+    }
+    return res.data.map((scene) => ({
+      id: scene.id,
+      groupId: scene.group.rid,
+      active: scene.status?.active
+    }));
+  }
+
   private async fetchGroupNameMap(): Promise<Map<string, string>> {
     const [rooms, zones] = await Promise.all([
       this.api.sendRequest<GroupResourceResponse>("GET", "/clip/v2/resource/room"),
