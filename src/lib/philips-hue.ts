@@ -674,18 +674,19 @@ class PhilipsHue {
       return StatusCodes.BadRequest;
     }
 
-    try {
-      await this.hueApi.sceneResource.recall(sceneId);
-      // Optimistic update so a fast selection lands visually before SSE confirms.
-      this.setSelectCurrentOption(groupId, sceneId);
-      return StatusCodes.Ok;
-    } catch (error) {
-      if (error instanceof HueError) {
-        return error.statusCode;
-      }
-      log.error("Scene recall failed for %s", sceneId, error);
-      return StatusCodes.ServerError;
-    }
+    // Optimistic UI: paint the new option immediately so the remote doesn't sit in a "pending"
+    // state while the bridge processes. Recall is fire-and-forget; SSE will reaffirm on success
+    // and we revert on failure. The bridge's PUT /scene response sometimes takes >1.5s for
+    // dynamic-palette scenes — awaiting it would block this handler (and the remote's UI) for
+    // the full RTT plus any retries.
+    this.setSelectCurrentOption(groupId, sceneId);
+    this.hueApi.sceneResource.recall(sceneId).catch((error) => {
+      log.error("Scene recall failed for %s, reverting Select to placeholder:", sceneId, error);
+      // We don't actually know which scene (if any) the bridge is currently in; safest is to
+      // revert to the placeholder. SSE will correct if some other scene was already active.
+      this.setSelectCurrentOption(groupId, undefined);
+    });
+    return StatusCodes.Ok;
   }
 
   private getMirek(entityId: string, config?: LightOrGroupConfig) {
