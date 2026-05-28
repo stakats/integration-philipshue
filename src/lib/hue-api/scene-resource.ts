@@ -68,7 +68,8 @@ class SceneResource {
       id: scene.id,
       name: scene.metadata.name,
       group: { rid: scene.group.rid, rtype },
-      groupName: groupNameById.get(scene.group.rid)
+      groupName: groupNameById.get(scene.group.rid),
+      active: scene.status?.active
     };
   }
 }

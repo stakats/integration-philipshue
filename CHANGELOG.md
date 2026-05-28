@@ -9,9 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Hue scenes are exposed as `Button` entities, named `<Group> - <Scene>`. Push the
-  button to recall the scene; the bridge auto-starts dynamics when the scene has
-  `auto_dynamic: true`.
+- Each Hue room/zone with scenes is exposed as a `Select` entity named `<Group> scenes`,
+  whose options are the group's scenes. Picking an option recalls the corresponding scene
+  (the bridge auto-starts dynamics for scenes with `auto_dynamic: true`). `current_option`
+  follows whichever scene the bridge reports as active, so the UI tracks activations from
+  the Hue app and other clients. A "—" placeholder option represents the "no scene active"
+  state and is a no-op when selected.
 
 ### Changed
 

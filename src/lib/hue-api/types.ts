@@ -410,6 +410,8 @@ export interface CombinedSceneResource {
   name: string;
   group: { rid: string; rtype: "room" | "zone" };
   groupName: string | undefined;
+  /** Live state from the bridge at fetch time, used to seed the Select's initial `current_option`. */
+  active?: "inactive" | "static" | "dynamic_palette";
 }
 
 export type GamutType = "A" | "B" | "C";
